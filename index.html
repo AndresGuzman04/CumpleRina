@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#03050d">
+<title>Cumple Rina</title>
+<!-- ═══════════ ICONO / FAVICON ═══════════ -->
+<link rel="icon" type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2303050d'/%3E%3Ctext x='50' y='.90em' font-size='82' text-anchor='middle' dominant-baseline='middle'%3E🎂%3C/text%3E%3C/svg%3E">
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%;background:#03050d;overflow:hidden;
+    -webkit-tap-highlight-color:transparent}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none}
+  #hint{
+    position:fixed;left:0;right:0;bottom:max(18px,env(safe-area-inset-bottom));
+    text-align:center;color:#bcd2f2;
+    font:700 13px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    letter-spacing:.16em;text-transform:uppercase;pointer-events:none;
+    text-shadow:0 2px 14px rgba(0,0,0,.85);
+    transition:opacity .35s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">Toca la pantalla ✨</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ══════════════════════════════════════════════════════
+   CONFIGURACIÓN
+   Cada mensaje es un ARRAY DE LÍNEAS (saltos de línea).
+   Los emojis se muestrean como siluetas brillantes.
+   ══════════════════════════════════════════════════════ */
+const CONFIG = {
+  words: [
+    ['FELICIDADES', 'RINA 🎉'],
+    ['UN AÑO MÁS', 'Y MÁS ARRUGAS JAJAJA'],
+    ['UN AÑO MÁS Y MAS CHISMES 😂', 'YA TU SABES JAJAJAJ'],
+    ['FELIZ CUMPLEAÑOS', 'NO ME DES LAS GRACIAS'],
+    ['MEJOR INVÍTAME', 'A COMER PASTEL', '🎂']
+  ],
+  textHues: [330, 45, 190, 275, 15],
+  bgBurstMin: 1.4,
+  bgBurstMax: 2.6,
+  intensityMax: 7,
+  intensityPerChunk: 0.75,
+  intensityPerTap: 0.85,
+  intensityDecay: 0.42,
+  holdDuration: 2.4,
+  fadeDuration: 1.3,
+  totalParticlesTarget: 1700,
+  lettersPerTap: [1, 2]
+};
+
+/* ══════════════════════════════════════════════════════
+   CANVAS Y BUFFERS
+   ══════════════════════════════════════════════════════ */
+const cvs   = document.getElementById('c');
+const ctx   = cvs.getContext('2d');
+const scene = document.createElement('canvas');
+const sctx  = scene.getContext('2d');
+
+let W = 0, H = 0, DPR = 1;
+let horizonY = 0, horizonD = 0;
+let skyGrad = null, oceanGrad = null, vignette = null, horizonGlow = null;
+let moonSprite = null;
+const MOON = { x: 0, y: 0, r: 34 };
+
+const stars   = [];
+const rockets = [];
+const parts   = [];
+const pendingBursts = [];
+const pendingLetters = [];
+
+let time = 0;
+let wordIdx = 0;
+let wordId = 0;
+let intensity = 1;
+let nextBgBurstAt = 0.6;
+let tapCount = 0;
+let hinted = false;
+
+let phase = 'IDLE';
+let currentWordData = null;
+let holdUntil = 0;
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+/* ══════════════════════════════════════════════════════
+   SPRITES DE BRILLO
+   ══════════════════════════════════════════════════════ */
+const glowCache = new Map();
+function glow(hue) {
+  const key = ((Math.round(hue / 12) * 12) % 360 + 360) % 360;
+  let c = glowCache.get(key);
+  if (c) return c;
+  const S = 64;
+  c = document.createElement('canvas');
+  c.width = c.height = S;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+  grd.addColorStop(0.00, 'rgba(255,255,255,1)');
+  grd.addColorStop(0.22, `hsla(${key},100%,80%,0.92)`);
+  grd.addColorStop(0.50, `hsla(${key},100%,60%,0.35)`);
+  grd.addColorStop(1.00, `hsla(${key},100%,50%,0)`);
+  g.fillStyle = grd;
+  g.fillRect(0, 0, S, S);
+  glowCache.set(key, c);
+  return c;
+}
+function drawGlow(g, x, y, size, hue, alpha) {
+  g.globalAlpha = alpha;
+  g.drawImage(glow(hue), x - size * 0.5, y - size * 0.5, size, size);
+}
+
+/* ══════════════════════════════════════════════════════
+   REDIMENSIONADO
+   ══════════════════════════════════════════════════════ */
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+
+  cvs.width  = Math.round(W * DPR);
+  cvs.height = Math.round(H * DPR);
+  cvs.style.width  = W + 'px';
+  cvs.style.height = H + 'px';
+
+  scene.width  = cvs.width;
+  scene.height = cvs.height;
+
+  sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+  horizonY = Math.round(H * 0.66);
+  horizonD = Math.round(horizonY * DPR);
+
+  buildSky();
+  buildStars();
+  buildMoon();
+  buildOverlays();
+}
+
+function buildSky() {
+  skyGrad = sctx.createLinearGradient(0, 0, 0, horizonY);
+  skyGrad.addColorStop(0.00, '#02040c');
+  skyGrad.addColorStop(0.35, '#050d22');
+  skyGrad.addColorStop(0.65, '#0a1a3a');
+  skyGrad.addColorStop(0.88, '#132c55');
+  skyGrad.addColorStop(1.00, '#1d3f70');
+
+  oceanGrad = ctx.createLinearGradient(0, horizonD, 0, cvs.height);
+  oceanGrad.addColorStop(0.00, '#0a1c36');
+  oceanGrad.addColorStop(0.30, '#061227');
+  oceanGrad.addColorStop(1.00, '#01030a');
+}
+
+function buildStars() {
+  stars.length = 0;
+  const n = Math.round((W * H) / 8500);
+  for (let i = 0; i < n; i++) {
+    stars.push({
+      x: Math.random() * W,
+      y: Math.random() * horizonY * 0.98,
+      r: rnd(0.35, 1.5),
+      a: rnd(0.20, 0.95),
+      sp: rnd(0.5, 2.6),
+      ph: Math.random() * Math.PI * 2
+    });
+  }
+}
+
+function buildMoon() {
+  MOON.r = Math.max(24, Math.min(W, H) * 0.045);
+  MOON.x = W * 0.78;
+  MOON.y = H * 0.16;
+
+  const sizeCss = MOON.r * 10;
+  const sizePx  = Math.ceil(sizeCss * DPR);
+  const c = document.createElement('canvas');
+  c.width = c.height = sizePx;
+  const g = c.getContext('2d');
+  const cx = sizePx / 2;
+  const R  = MOON.r * DPR;
+
+  let grd = g.createRadialGradient(cx, cx, R * 0.85, cx, cx, sizePx / 2);
+  grd.addColorStop(0.00, 'rgba(155,195,255,0.30)');
+  grd.addColorStop(0.35, 'rgba(120,160,240,0.10)');
+  grd.addColorStop(1.00, 'rgba(90,130,220,0)');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, sizePx, sizePx);
+
+  grd = g.createRadialGradient(cx - R * 0.30, cx - R * 0.35, R * 0.10, cx, cx, R);
+  grd.addColorStop(0.00, '#ffffff');
+  grd.addColorStop(0.60, '#e9f1ff');
+  grd.addColorStop(1.00, '#b7cbf0');
+  g.beginPath();
+  g.arc(cx, cx, R, 0, Math.PI * 2);
+  g.fillStyle = grd;
+  g.fill();
+
+  g.globalAlpha = 0.09;
+  g.fillStyle = '#7d94bb';
+  g.beginPath(); g.arc(cx - R * 0.26, cx + R * 0.14, R * 0.22, 0, 6.2832); g.fill();
+  g.beginPath(); g.arc(cx + R * 0.30, cx - R * 0.30, R * 0.14, 0, 6.2832); g.fill();
+  g.beginPath(); g.arc(cx + R * 0.06, cx + R * 0.46, R * 0.10, 0, 6.2832); g.fill();
+  g.globalAlpha = 1;
+
+  moonSprite = { c, size: sizeCss };
+}
+
+function buildOverlays() {
+  horizonGlow = ctx.createLinearGradient(0, horizonD - 60 * DPR, 0, horizonD + 40 * DPR);
+  horizonGlow.addColorStop(0.00, 'rgba(140,185,255,0)');
+  horizonGlow.addColorStop(0.50, 'rgba(150,195,255,0.10)');
+  horizonGlow.addColorStop(1.00, 'rgba(140,185,255,0)');
+
+  vignette = ctx.createRadialGradient(
+    cvs.width * 0.5, cvs.height * 0.45, Math.min(cvs.width, cvs.height) * 0.25,
+    cvs.width * 0.5, cvs.height * 0.50, Math.max(cvs.width, cvs.height) * 0.78
+  );
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.58)');
+}
+
+/* ══════════════════════════════════════════════════════
+   MUESTREO DE PALABRA MULTI-LÍNEA
+   Fuente delgada + separación entre letras + emojis.
+   ══════════════════════════════════════════════════════ */
+const tmp  = document.createElement('canvas');
+const tctx = tmp.getContext('2d');
+
+const FONT_FAMILY = `"Arial", "Helvetica Neue", "Segoe UI", system-ui, sans-serif`;
+const FONT_WEIGHT = 700;
+
+function sampleWord(lines, fs) {
+  const FONT = `${FONT_WEIGHT} ${fs}px ${FONT_FAMILY}`;
+  const letterGap = fs * 0.055;
+  const lineH     = fs * 1.22;
+
+  tctx.font = FONT;
+
+  // Repartimos cada línea en caracteres respetando emojis (code points)
+  const lineChars = lines.map(l => [...l]);
+
+  const lineWidths = lineChars.map(chars => {
+    let w = 0;
+    for (let i = 0; i < chars.length; i++) {
+      w += tctx.measureText(chars[i]).width;
+      if (i < chars.length - 1) w += letterGap;
+    }
+    return w;
+  });
+
+  const maxLineW = Math.max(...lineWidths, 1);
+  const totalH   = lines.length * lineH;
+
+  const padX = Math.ceil(fs * 0.30);
+  const padY = Math.ceil(fs * 0.25);
+
+  const w = Math.ceil(maxLineW) + padX * 2;
+  const h = Math.ceil(totalH) + padY * 2;
+
+  tmp.width  = w;
+  tmp.height = h;
+
+  tctx.font = FONT;
+  tctx.textAlign = 'left';
+  tctx.textBaseline = 'middle';
+  tctx.fillStyle = '#fff';
+
+  for (let li = 0; li < lines.length; li++) {
+    const chars = lineChars[li];
+    const y     = padY + lineH * li + lineH / 2;
+    let x       = (w - lineWidths[li]) / 2;
+    for (let ci = 0; ci < chars.length; ci++) {
+      tctx.fillText(chars[ci], x, y);
+      x += tctx.measureText(chars[ci]).width + letterGap;
+    }
+  }
+
+  const data = tctx.getImageData(0, 0, w, h).data;
+  const step = Math.max(3, Math.round(fs / 18));
+
+  const letters = [];
+  for (let li = 0; li < lines.length; li++) {
+    const chars = lineChars[li];
+    const y     = padY + lineH * li + lineH / 2;
+    const yc    = y - h / 2;
+
+    let x = (w - lineWidths[li]) / 2;
+    for (let ci = 0; ci < chars.length; ci++) {
+      const ch  = chars[ci];
+      const chW = tctx.measureText(ch).width;
+      const cx  = x + chW / 2;
+      const cxr = cx - w / 2;
+
+      const x0 = Math.max(0, Math.floor(x));
+      const x1 = Math.min(w, Math.ceil(x + chW));
+      const y0 = Math.max(0, Math.floor(y - lineH * 0.55));
+      const y1 = Math.min(h, Math.ceil(y + lineH * 0.55));
+
+      const pts = [];
+      for (let py = y0; py < y1; py += step) {
+        for (let px = x0; px < x1; px += step) {
+          if (data[(py * w + px) * 4 + 3] > 128) {
+            pts.push([px - cx, py - y]);
+          }
+        }
+      }
+
+      letters.push({
+        ch,
+        points: pts,
+        centerX: cxr,
+        centerY: yc
+      });
+
+      x += chW + letterGap;
+    }
+  }
+
+  return { letters, w, h };
+}
+
+/* ══════════════════════════════════════════════════════
+   COHETES
+   ══════════════════════════════════════════════════════ */
+function scheduleBurst(x, y, delay) {
+  pendingBursts.push({ x, y, at: time + delay });
+}
+
+function launchBurst(tx, ty) {
+  if (parts.length > 6500) return;
+
+  const x = tx !== undefined ? tx : rnd(W * 0.10, W * 0.90);
+  const y = ty !== undefined ? ty : rnd(H * 0.28, horizonY - H * 0.10);
+
+  rockets.push({
+    x: Math.max(30, Math.min(W - 30, x)),
+    y: horizonY + 10,
+    vx: rnd(-18, 18),
+    vy: -(H * 0.50 + rnd(0, H * 0.22)),
+    ty: Math.max(H * 0.10, Math.min(y, horizonY - H * 0.06)),
+    hue: Math.random() * 360,
+    kind: 'burst'
+  });
+}
+
+function placeLetterNow(idx) {
+  const cd = currentWordData;
+  if (!cd) return;
+  const L = cd.letters[idx];
+  if (!L || L.points.length === 0) return;
+
+  const sc = cd.scale;
+  const cx = cd.centerX;
+  const cy = cd.centerY;
+
+  const targetX = cx + L.centerX * sc;
+  const targetY = cy + L.centerY * sc;
+
+  // Tamaño de partícula adaptado al tamaño REAL del texto en pantalla.
+  // Reducimos mínimos para que en pantallas pequeñas no se vea grueso.
+  const trueFs = cd.sampleFs * sc;
+  const sizeMin = Math.min(14, Math.max(3.5, trueFs * 0.11));
+  const sizeMax = Math.min(20, Math.max(6.5, trueFs * 0.17));
+
+  rockets.push({
+    x: targetX + rnd(-W * 0.02, W * 0.02),
+    y: horizonY + 10,
+    vx: rnd(-8, 8),
+    vy: -(H * 0.68),
+    ty: targetY + rnd(H * 0.015, H * 0.045),
+    hue: cd.hue + rnd(-14, 14),
+    kind: 'letter',
+    letterPoints: L.points,
+    letterScale: sc,
+    targetX, targetY,
+    perLetterCap: cd.perLetterCap,
+    particleSizeMin: sizeMin,
+    particleSizeMax: sizeMax,
+    wordId
+  });
+}
+
+function placeRandomLetters() {
+  const cd = currentWordData;
+  if (!cd) return true;
+
+  const range = CONFIG.lettersPerTap;
+  const count = range[0] + Math.floor(Math.random() * (range[1] - range[0] + 1));
+
+  let placed = 0;
+  let safety = 0;
+  while (placed < count && cd.letterIdx < cd.letters.length && safety < 200) {
+    const idx = cd.letterIdx;
+    const L = cd.letters[idx];
+    cd.letterIdx++;
+    safety++;
+    if (L.points.length > 0) {
+      pendingLetters.push({ idx, at: time + 0.10 * placed });
+      placed++;
+    }
+  }
+
+  return cd.letterIdx >= cd.letters.length;
+}
+
+function updateRockets(dt) {
+  for (let i = rockets.length - 1; i >= 0; i--) {
+    const r = rockets[i];
+    r.x  += r.vx * dt;
+    r.y  += r.vy * dt;
+    r.vy += 62 * dt;
+
+    parts.push({
+      kind: 'trail',
+      x: r.x + rnd(-1.5, 1.5), y: r.y + rnd(0, 4),
+      vx: rnd(-16, 16), vy: rnd(14, 46),
+      age: 0, life: rnd(0.35, 0.75),
+      hue: r.kind === 'letter' ? r.hue : 38,
+      size: rnd(6, 11)
+    });
+
+    if (r.y <= r.ty || r.vy >= 0) {
+      if (r.kind === 'letter') explodeLetter(r);
+      else                     explodeBurst(r.x, r.y, r.hue);
+      rockets.splice(i, 1);
+    }
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   EXPLOSIONES
+   ══════════════════════════════════════════════════════ */
+function explodeBurst(x, y, hue) {
+  const mult = 1 + (intensity - 1) * 0.28;
+  const n = Math.round(rnd(80, 150) * mult);
+  const type = Math.random();
+  const power = rnd(110, 300);
+
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = power * (type < 0.35 ? Math.sqrt(Math.random()) : rnd(0.35, 1));
+    parts.push({
+      kind: 'burst',
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      hue: hue + rnd(-28, 28),
+      size: rnd(13, 24),
+      age: 0,
+      life: rnd(1.1, 2.0),
+      seed: Math.random() * 10
+    });
+  }
+}
+
+function explodeLetter(r) {
+  const pts = r.letterPoints;
+  const sc  = r.letterScale;
+  const cx  = r.targetX;
+  const cy  = r.targetY;
+  const cap = r.perLetterCap || 80;
+
+  const sizeMin = r.particleSizeMin || 5;
+  const sizeMax = r.particleSizeMax || 12;
+
+  const keep = Math.min(1, cap / Math.max(1, pts.length));
+
+  for (let i = 0; i < pts.length; i++) {
+    if (Math.random() > keep) continue;
+
+    const tx = cx + pts[i][0] * sc;
+    const ty = cy + pts[i][1] * sc;
+
+    const a  = Math.random() * Math.PI * 2;
+    const sp = rnd(100, 400);
+
+    parts.push({
+      kind: 'text',
+      x: r.x + rnd(-15, 15),
+      y: r.y + rnd(-15, 15),
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      tx, ty,
+      hue: r.hue + rnd(-20, 20),
+      size: rnd(sizeMin, sizeMax),
+      age: 0,
+      delay: rnd(0.08, 0.42),
+      fadeAt: Infinity,
+      hold: true,
+      wordId: r.wordId,
+      seed: Math.random() * 10
+    });
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   ACTUALIZACIÓN DE PARTÍCULAS
+   ══════════════════════════════════════════════════════ */
+function updateParts(dt) {
+  const fade = CONFIG.fadeDuration;
+
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.age += dt;
+
+    if (p.kind === 'trail') {
+      p.vy += 42 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.98; p.vy *= 0.98;
+      if (p.age >= p.life) parts.splice(i, 1);
+      continue;
+    }
+
+    if (p.kind === 'burst') {
+      const f = Math.pow(0.965, dt * 60);
+      p.vx *= f; p.vy *= f;
+      p.vy += 58 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.age >= p.life) parts.splice(i, 1);
+      continue;
+    }
+
+    if (p.age < p.delay) {
+      const f = Math.pow(0.94, dt * 60);
+      p.vx *= f; p.vy *= f;
+      p.vy += 45 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    } else if (p.hold || p.age < p.fadeAt) {
+      const k = 32;
+      p.vx += (p.tx - p.x) * k * dt;
+      p.vy += (p.ty - p.y) * k * dt;
+      const f = Math.pow(0.90, dt * 60);
+      p.vx *= f; p.vy *= f;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+    } else {
+      p.vy += 75 * dt;
+      p.vx *= 0.97; p.vy *= 0.97;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.age > p.fadeAt + fade) parts.splice(i, 1);
+    }
+  }
+}
+
+function partAlpha(p) {
+  if (p.kind === 'trail') return Math.max(0, 1 - p.age / p.life) * 0.55;
+
+  if (p.kind === 'burst') {
+    const t = p.age / p.life;
+    const flick = 0.72 + 0.28 * Math.sin(p.age * 42 + p.seed);
+    return Math.max(0, 1 - t) * flick;
+  }
+
+  if (p.age < p.delay)  return 0.50;
+  if (p.hold)           return 0.75 + 0.12 * Math.sin(p.age * 8 + p.seed);
+  if (p.age < p.fadeAt) return 0.75 + 0.12 * Math.sin(p.age * 8 + p.seed);
+  return Math.max(0, 1 - (p.age - p.fadeAt) / CONFIG.fadeDuration) * 0.85;
+}
+
+/* ══════════════════════════════════════════════════════
+   CICLO DEL MENSAJE
+   ══════════════════════════════════════════════════════ */
+function startWord() {
+  const lines = CONFIG.words[wordIdx % CONFIG.words.length];
+  const hue   = CONFIG.textHues[wordIdx % CONFIG.textHues.length];
+  wordIdx++;
+  wordId++;
+
+  const SAMPLE_FS = 180;
+  const data = sampleWord(lines, SAMPLE_FS);
+
+  const maxW = W * 0.92;
+  const maxH = Math.min(H * 0.34, 240);
+
+  let sc = Math.min(maxW / data.w, maxH / data.h);
+  sc = Math.max(sc, 0.06);
+
+  const visibleLetters = data.letters.filter(L => L.points.length > 0).length || 1;
+  const perLetterCap = Math.max(
+    22,
+    Math.min(
+      85,
+      Math.floor(CONFIG.totalParticlesTarget / visibleLetters)
+    )
+  );
+
+  currentWordData = {
+    lines, hue,
+    letters: data.letters,
+    scale: sc,
+    centerX: W * 0.5,
+    centerY: Math.min(H * 0.24, horizonY * 0.42),
+    letterIdx: 0,
+    perLetterCap,
+    sampleFs: SAMPLE_FS
+  };
+
+  phase = 'BUILDING';
+}
+
+function startFading() {
+  phase = 'FADING';
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (p.kind === 'text' && p.hold) {
+      p.hold = false;
+      p.fadeAt = p.age;
+    }
+  }
+}
+
+function countTextParticles() {
+  let n = 0;
+  for (let i = 0; i < parts.length; i++) if (parts[i].kind === 'text') n++;
+  return n;
+}
+
+/* ══════════════════════════════════════════════════════
+   HINT
+   ══════════════════════════════════════════════════════ */
+const hint = document.getElementById('hint');
+
+function updateHint() {
+  if (tapCount === 0) {
+    hint.textContent = 'Toca la pantalla ✨';
+  } else if (phase === 'BUILDING') {
+    hint.textContent = 'Toca para seguir el mensaje ✨';
+  } else if (phase === 'HOLD' || phase === 'FADING') {
+    hint.textContent = 'Toca para más fuegos 🔥';
+  } else {
+    hint.textContent = 'Toca para el siguiente mensaje ✨';
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   ACTUALIZACIÓN GLOBAL
+   ══════════════════════════════════════════════════════ */
+function update(dt) {
+  time += dt;
+
+  for (let i = pendingBursts.length - 1; i >= 0; i--) {
+    if (time >= pendingBursts[i].at) {
+      launchBurst(pendingBursts[i].x, pendingBursts[i].y);
+      pendingBursts.splice(i, 1);
+    }
+  }
+
+  for (let i = pendingLetters.length - 1; i >= 0; i--) {
+    if (time >= pendingLetters[i].at) {
+      placeLetterNow(pendingLetters[i].idx);
+      pendingLetters.splice(i, 1);
+    }
+  }
+
+  if (time > nextBgBurstAt) {
+    launchBurst();
+    const extra = Math.floor((intensity - 1) * 0.55);
+    for (let i = 0; i < extra; i++) {
+      scheduleBurst(undefined, undefined, 0.09 * (i + 1));
+    }
+    const speed = Math.pow(intensity, 0.55);
+    nextBgBurstAt = time + rnd(CONFIG.bgBurstMin, CONFIG.bgBurstMax) / speed;
+  }
+
+  if (phase === 'HOLD' && time > holdUntil) {
+    startFading();
+    updateHint();
+  }
+  if (phase === 'FADING' && countTextParticles() === 0) {
+    phase = 'IDLE';
+    currentWordData = null;
+    updateHint();
+  }
+
+  intensity = 1 + (intensity - 1) * Math.exp(-CONFIG.intensityDecay * dt);
+  if (intensity < 1.01) intensity = 1;
+
+  updateRockets(dt);
+  updateParts(dt);
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDER
+   ══════════════════════════════════════════════════════ */
+function render() {
+  sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  sctx.globalCompositeOperation = 'source-over';
+  sctx.globalAlpha = 1;
+  sctx.fillStyle = skyGrad;
+  sctx.fillRect(0, 0, W, H);
+
+  sctx.fillStyle = '#dce9ff';
+  for (let i = 0; i < stars.length; i++) {
+    const s = stars[i];
+    sctx.globalAlpha = s.a * (0.55 + 0.45 * Math.sin(time * s.sp + s.ph));
+    sctx.beginPath();
+    sctx.arc(s.x, s.y, s.r, 0, 6.2832);
+    sctx.fill();
+  }
+  sctx.globalAlpha = 1;
+
+  if (moonSprite) {
+    sctx.drawImage(
+      moonSprite.c,
+      MOON.x - moonSprite.size / 2,
+      MOON.y - moonSprite.size / 2,
+      moonSprite.size,
+      moonSprite.size
+    );
+  }
+
+  sctx.globalCompositeOperation = 'lighter';
+
+  for (let i = 0; i < rockets.length; i++) {
+    const r = rockets[i];
+    drawGlow(sctx, r.x, r.y, 17, r.kind === 'letter' ? r.hue : 40, 1);
+  }
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const a = partAlpha(p);
+    if (a <= 0.01) continue;
+    drawGlow(sctx, p.x, p.y, p.size, p.hue, a);
+  }
+  sctx.globalAlpha = 1;
+  sctx.globalCompositeOperation = 'source-over';
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.clearRect(0, 0, cvs.width, cvs.height);
+  ctx.drawImage(scene, 0, 0);
+
+  ctx.fillStyle = oceanGrad;
+  ctx.fillRect(0, horizonD, cvs.width, cvs.height - horizonD);
+
+  ctx.globalCompositeOperation = 'lighter';
+
+  const strip  = Math.max(2, Math.round(3 * DPR));
+  const oceanH = cvs.height - horizonD;
+  const extra  = 60 * DPR;
+
+  for (let y = horizonD; y < cvs.height; y += strip) {
+    const t = (y - horizonD) / oceanH;
+    const srcTop = 2 * horizonD - y - strip;
+    if (srcTop < 0) break;
+
+    const yc  = y / DPR;
+    const wob = (
+      Math.sin(yc * 0.050 + time * 2.4) * (1.5 + t * 9.0) +
+      Math.sin(yc * 0.130 - time * 1.7) * (0.8 + t * 4.5)
+    ) * DPR;
+
+    ctx.globalAlpha = 0.55 * Math.pow(1 - t, 1.1);
+
+    ctx.save();
+    ctx.translate(wob, y);
+    ctx.scale(1, -1);
+    ctx.drawImage(
+      scene,
+      0, srcTop, cvs.width, strip,
+      -extra / 2, -strip, cvs.width + extra, strip
+    );
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = horizonGlow;
+  ctx.fillRect(0, horizonD - 60 * DPR, cvs.width, 100 * DPR);
+
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, cvs.width, cvs.height);
+}
+
+/* ══════════════════════════════════════════════════════
+   BUCLE
+   ══════════════════════════════════════════════════════ */
+let lastT = 0;
+function loop(now) {
+  if (!lastT) lastT = now;
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > 0.05) dt = 0.05;
+  if (dt < 0)    dt = 0;
+
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+/* ══════════════════════════════════════════════════════
+   INTERACCIÓN
+   ══════════════════════════════════════════════════════ */
+function spawnLocalBursts(x, y, n, spread) {
+  spread = spread || 0.18;
+  for (let i = 0; i < n; i++) {
+    const bx = x + rnd(-W * spread, W * spread);
+    const by = Math.max(H * 0.10,
+               Math.min(y + rnd(-H * 0.10, H * 0.10), horizonY - H * 0.06));
+    scheduleBurst(bx, by, 0.05 + i * 0.09);
+  }
+}
+
+function onTap(x, y) {
+  tapCount++;
+  if (!hinted) { hinted = true; hint.style.opacity = '1'; }
+
+  if (phase === 'IDLE') {
+    startWord();
+    const done = placeRandomLetters();
+    if (done) {
+      phase = 'HOLD';
+      holdUntil = time + CONFIG.holdDuration;
+    }
+    intensity = Math.min(CONFIG.intensityMax, intensity + CONFIG.intensityPerChunk);
+    spawnLocalBursts(x, y, 1 + Math.floor(intensity * 0.4));
+
+  } else if (phase === 'BUILDING') {
+    const done = placeRandomLetters();
+    intensity = Math.min(CONFIG.intensityMax, intensity + CONFIG.intensityPerChunk);
+
+    if (done) {
+      phase = 'HOLD';
+      holdUntil = time + CONFIG.holdDuration;
+    }
+    spawnLocalBursts(x, y, 1 + Math.floor(intensity * 0.4));
+
+  } else {
+    intensity = Math.min(CONFIG.intensityMax, intensity + CONFIG.intensityPerTap);
+    spawnLocalBursts(x, y, 2 + Math.floor(intensity * 0.55), 0.20);
+  }
+
+  updateHint();
+}
+
+cvs.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  onTap(e.clientX, e.clientY);
+}, { passive: false });
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    e.preventDefault();
+    onTap(rnd(W * 0.25, W * 0.75), rnd(H * 0.20, H * 0.45));
+  }
+});
+
+/* ══════════════════════════════════════════════════════
+   ARRANQUE
+   ══════════════════════════════════════════════════════ */
+let resizeTimer = null;
+function onResize() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(resize, 120);
+}
+window.addEventListener('resize', onResize);
+window.addEventListener('orientationchange', onResize);
+
+resize();
+updateHint();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
